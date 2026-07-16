@@ -16,7 +16,17 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def find_price_column(df):
-    price_keywords = ['цена', 'cpm', 'ecpm', 'price', 'ставка', 'cost']
+    """
+    Находит столбец с ценой (CPM).
+    Сначала ищет точное совпадение 'Цена' (без учёта регистра и пробелов),
+    затем ищет по ключевым словам.
+    """
+    # Точное совпадение
+    for col in df.columns:
+        if col.strip().lower() == 'цена':
+            return col
+    # По ключевым словам
+    price_keywords = ['cpm', 'ecpm', 'price', 'ставка', 'cost']
     for col in df.columns:
         col_lower = col.lower().strip()
         if any(kw in col_lower for kw in price_keywords):
@@ -24,15 +34,20 @@ def find_price_column(df):
     return None
 
 def detect_dsp_start(df, price_col):
-    # ищем первую строку с дробной ценой в исходном порядке
+    """
+    Определяет индекс (в исходном DataFrame) первой строки с дробной ценой.
+    """
     for idx, row in df.iterrows():
         val = row[price_col]
         if not pd.isna(val) and isinstance(val, (int, float)):
-            if abs(val - round(val)) > 1e-9:
+            if abs(val - round(val)) > 1e-9:  # есть дробная часть
                 return idx
     return None
 
 def detect_dsp_by_sum_jump(df_sorted):
+    """
+    Запасной метод: ищем скачок сумм >10 раз.
+    """
     for i in range(1, len(df_sorted)):
         prev = df_sorted.iloc[i-1]['Сумма без НДС']
         curr = df_sorted.iloc[i]['Сумма без НДС']
@@ -41,34 +56,37 @@ def detect_dsp_by_sum_jump(df_sorted):
     return None
 
 def process_supplier_file(filepath):
+    # 1. Читаем первый лист
     df = pd.read_excel(filepath, sheet_name=0)
     df.columns = df.columns.str.strip()
 
-    # ---- Очистка ----
-    # 1. Удаляем нулевые показы и суммы
+    # 2. Очистка:
+    # - удаляем нулевые показы и суммы
     df = df[df['Показы'] > 0]
     df = df[df['Сумма без НДС'] > 0]
 
-    # 2. Удаляем строки с пустыми названиями кампаний
-    df = df[df['Кампания'].astype(str).str.strip() != '']
-
-    # 3. Удаляем olv_camp (любое окончание)
+    # - удаляем строки с olv_camp (любое окончание, регистронезависимо)
     df['Кампания_clean'] = df['Кампания'].astype(str).str.strip().str.lower()
-    df = df[~df['Кампания_clean'].str.contains(r'olv_camp', na=False)]
+    df = df[~df['Кампания_clean'].str.contains('olv_camp', na=False)]
     df = df.drop(columns=['Кампания_clean'])
+
+    # - удаляем пустые названия кампаний (NaN или пустая строка)
+    df = df.dropna(subset=['Кампания'])
+    df = df[df['Кампания'].astype(str).str.strip() != '']
 
     if df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    # ---- Определение ДСП ----
+    # 3. Находим столбец с ценой
     price_col = find_price_column(df)
     dsp_start_idx = None
 
     if price_col is not None:
+        # Пытаемся найти первую дробную цену в исходном порядке (после очистки)
         dsp_start_idx = detect_dsp_start(df, price_col)
 
+    # 4. Если не нашли дробную цену, используем запасной метод (скачок сумм)
     if dsp_start_idx is None:
-        # fallback: сортируем по сумме и ищем скачок
         df_sorted = df.sort_values(by='Сумма без НДС', ascending=False).reset_index(drop=True)
         jump_idx = detect_dsp_by_sum_jump(df_sorted)
         if jump_idx is not None:
@@ -76,9 +94,10 @@ def process_supplier_file(filepath):
             df_sorted.loc[jump_idx:, 'Тип'] = 'ДСП'
             df = df_sorted
         else:
+            # Если ничего не нашли, всё основное
             df['Тип'] = 'Основной'
     else:
-        # помечаем по индексу первой дробной цены (в исходном порядке)
+        # Размечаем по найденному индексу
         df = df.copy()
         df_reset = df.reset_index(drop=True)
         pos = None
@@ -91,11 +110,12 @@ def process_supplier_file(filepath):
             df_reset.loc[pos:, 'Тип'] = 'ДСП'
             df = df_reset
         else:
+            # fallback
             df['Тип'] = 'Основной'
 
-    # ---- Группировка ----
+    # 5. Группировка
     agg_funcs = {
-        'Показы': lambda x: round(sum(x) / 1000, 3),   # три знака
+        'Показы': lambda x: round(sum(x) / 1000, 3),   # три знака после запятой
         'Сумма без НДС': 'sum'
     }
 
@@ -105,7 +125,6 @@ def process_supplier_file(filepath):
     dsp_df = df[df['Тип'] == 'ДСП'].groupby('Кампания').agg(agg_funcs).reset_index()
     dsp_df.columns = ['Кампания', 'Показы (тыс.)', 'Сумма без НДС']
 
-    # Добавляем итоговую строку
     if not main_df.empty:
         main_df.loc['Итого'] = ['Итого', main_df['Показы (тыс.)'].sum(), main_df['Сумма без НДС'].sum()]
     if not dsp_df.empty:
@@ -126,11 +145,9 @@ def upload_file():
         return jsonify({'error': 'Имя файла пустое'}), 400
     if not allowed_file(file.filename):
         return jsonify({'error': 'Разрешены только .xlsx и .xls'}), 400
-
     filename = secure_filename(file.filename)
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
     file.save(filepath)
-
     try:
         main_df, dsp_df = process_supplier_file(filepath)
         main_json = main_df.to_dict(orient='records') if not main_df.empty else []
@@ -150,7 +167,6 @@ def download_result():
     dsp_df = app.config.get('LAST_DSP')
     if main_df is None or dsp_df is None:
         return jsonify({'error': 'Нет обработанных данных'}), 400
-
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         if not main_df.empty:
