@@ -16,32 +16,34 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def find_price_column(df):
-    """
-    Находит столбец с ценой (CPM).
-    Сначала ищет точное совпадение 'Цена' (без учёта регистра и пробелов),
-    затем ищет по ключевым словам.
-    """
-    # Точное совпадение
+    """Находит столбец с ценой (CPM)."""
+    # Точное совпадение (без учёта регистра и пробелов)
     for col in df.columns:
-        if col.strip().lower() == 'цена':
+        col_clean = col.strip().lower()
+        if col_clean == 'цена':
             return col
     # По ключевым словам
-    price_keywords = ['cpm', 'ecpm', 'price', 'ставка', 'cost']
+    keywords = ['cpm', 'ecpm', 'price', 'ставка', 'cost']
     for col in df.columns:
-        col_lower = col.lower().strip()
-        if any(kw in col_lower for kw in price_keywords):
+        col_clean = col.strip().lower()
+        if any(kw in col_clean for kw in keywords):
             return col
     return None
 
 def detect_dsp_start(df, price_col):
     """
-    Определяет индекс (в исходном DataFrame) первой строки с дробной ценой.
+    Возвращает индекс (позицию) первой строки с дробной ценой.
+    Если все цены целые — возвращает None.
     """
     for idx, row in df.iterrows():
         val = row[price_col]
-        if not pd.isna(val) and isinstance(val, (int, float)):
-            if abs(val - round(val)) > 1e-9:  # есть дробная часть
-                return idx
+        try:
+            val = float(val)
+        except (ValueError, TypeError):
+            continue
+        # Проверяем, есть ли дробная часть
+        if abs(val - round(val)) > 1e-9:
+            return idx
     return None
 
 def detect_dsp_by_sum_jump(df_sorted):
@@ -65,55 +67,47 @@ def process_supplier_file(filepath):
     df = df[df['Показы'] > 0]
     df = df[df['Сумма без НДС'] > 0]
 
-    # - удаляем строки с olv_camp (любое окончание, регистронезависимо)
+    # - удаляем строки с olv_camp (любое окончание)
     df['Кампания_clean'] = df['Кампания'].astype(str).str.strip().str.lower()
     df = df[~df['Кампания_clean'].str.contains('olv_camp', na=False)]
     df = df.drop(columns=['Кампания_clean'])
 
-    # - удаляем пустые названия кампаний (NaN или пустая строка)
+    # - удаляем пустые названия кампаний
     df = df.dropna(subset=['Кампания'])
     df = df[df['Кампания'].astype(str).str.strip() != '']
 
     if df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    # 3. Находим столбец с ценой
+    # 3. Сбрасываем индекс, чтобы строки шли по порядку
+    df = df.reset_index(drop=True)
+
+    # 4. Находим столбец с ценой
     price_col = find_price_column(df)
-    dsp_start_idx = None
+    dsp_start_pos = None
 
     if price_col is not None:
-        # Пытаемся найти первую дробную цену в исходном порядке (после очистки)
-        dsp_start_idx = detect_dsp_start(df, price_col)
+        dsp_start_pos = detect_dsp_start(df, price_col)
 
-    # 4. Если не нашли дробную цену, используем запасной метод (скачок сумм)
-    if dsp_start_idx is None:
+    # 5. Если не нашли дробную цену — используем запасной метод
+    if dsp_start_pos is None:
+        # Сортируем по убыванию суммы
         df_sorted = df.sort_values(by='Сумма без НДС', ascending=False).reset_index(drop=True)
-        jump_idx = detect_dsp_by_sum_jump(df_sorted)
-        if jump_idx is not None:
-            df_sorted.loc[:jump_idx-1, 'Тип'] = 'Основной'
-            df_sorted.loc[jump_idx:, 'Тип'] = 'ДСП'
+        jump_pos = detect_dsp_by_sum_jump(df_sorted)
+        if jump_pos is not None:
+            df_sorted.loc[:jump_pos-1, 'Тип'] = 'Основной'
+            df_sorted.loc[jump_pos:, 'Тип'] = 'ДСП'
             df = df_sorted
         else:
-            # Если ничего не нашли, всё основное
+            # Если ничего не нашли — всё основное
             df['Тип'] = 'Основной'
     else:
-        # Размечаем по найденному индексу
-        df = df.copy()
-        df_reset = df.reset_index(drop=True)
-        pos = None
-        for i, row in df_reset.iterrows():
-            if row.name == dsp_start_idx:
-                pos = i
-                break
-        if pos is not None:
-            df_reset.loc[:pos-1, 'Тип'] = 'Основной'
-            df_reset.loc[pos:, 'Тип'] = 'ДСП'
-            df = df_reset
-        else:
-            # fallback
-            df['Тип'] = 'Основной'
+        # Размечаем: все строки до dsp_start_pos (не включая её) — Основное,
+        # начиная с dsp_start_pos — ДСП
+        df.loc[:dsp_start_pos-1, 'Тип'] = 'Основной'
+        df.loc[dsp_start_pos:, 'Тип'] = 'ДСП'
 
-    # 5. Группировка
+    # 6. Группировка
     agg_funcs = {
         'Показы': lambda x: round(sum(x) / 1000, 3),   # три знака после запятой
         'Сумма без НДС': 'sum'
@@ -132,6 +126,7 @@ def process_supplier_file(filepath):
 
     return main_df, dsp_df
 
+# Flask routes (без изменений)
 @app.route('/')
 def index():
     return render_template('index.html')
