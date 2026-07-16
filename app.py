@@ -24,6 +24,7 @@ def find_price_column(df):
     return None
 
 def detect_dsp_start(df, price_col):
+    # ищем первую строку с дробной ценой в исходном порядке
     for idx, row in df.iterrows():
         val = row[price_col]
         if not pd.isna(val) and isinstance(val, (int, float)):
@@ -43,18 +44,23 @@ def process_supplier_file(filepath):
     df = pd.read_excel(filepath, sheet_name=0)
     df.columns = df.columns.str.strip()
 
-    # Очистка
+    # ---- Очистка ----
+    # 1. Удаляем нулевые показы и суммы
     df = df[df['Показы'] > 0]
     df = df[df['Сумма без НДС'] > 0]
-    # Удаляем olv_campaign (с пробелами и разным регистром)
+
+    # 2. Удаляем строки с пустыми названиями кампаний
+    df = df[df['Кампания'].astype(str).str.strip() != '']
+
+    # 3. Удаляем olv_camp (любое окончание)
     df['Кампания_clean'] = df['Кампания'].astype(str).str.strip().str.lower()
     df = df[~df['Кампания_clean'].str.contains(r'olv_camp', na=False)]
     df = df.drop(columns=['Кампания_clean'])
-    df = df.dropna(subset=['Кампания'])
 
     if df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
+    # ---- Определение ДСП ----
     price_col = find_price_column(df)
     dsp_start_idx = None
 
@@ -62,6 +68,7 @@ def process_supplier_file(filepath):
         dsp_start_idx = detect_dsp_start(df, price_col)
 
     if dsp_start_idx is None:
+        # fallback: сортируем по сумме и ищем скачок
         df_sorted = df.sort_values(by='Сумма без НДС', ascending=False).reset_index(drop=True)
         jump_idx = detect_dsp_by_sum_jump(df_sorted)
         if jump_idx is not None:
@@ -71,6 +78,7 @@ def process_supplier_file(filepath):
         else:
             df['Тип'] = 'Основной'
     else:
+        # помечаем по индексу первой дробной цены (в исходном порядке)
         df = df.copy()
         df_reset = df.reset_index(drop=True)
         pos = None
@@ -85,6 +93,7 @@ def process_supplier_file(filepath):
         else:
             df['Тип'] = 'Основной'
 
+    # ---- Группировка ----
     agg_funcs = {
         'Показы': lambda x: round(sum(x) / 1000, 3),   # три знака
         'Сумма без НДС': 'sum'
@@ -96,6 +105,7 @@ def process_supplier_file(filepath):
     dsp_df = df[df['Тип'] == 'ДСП'].groupby('Кампания').agg(agg_funcs).reset_index()
     dsp_df.columns = ['Кампания', 'Показы (тыс.)', 'Сумма без НДС']
 
+    # Добавляем итоговую строку
     if not main_df.empty:
         main_df.loc['Итого'] = ['Итого', main_df['Показы (тыс.)'].sum(), main_df['Сумма без НДС'].sum()]
     if not dsp_df.empty:
@@ -116,9 +126,11 @@ def upload_file():
         return jsonify({'error': 'Имя файла пустое'}), 400
     if not allowed_file(file.filename):
         return jsonify({'error': 'Разрешены только .xlsx и .xls'}), 400
+
     filename = secure_filename(file.filename)
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
     file.save(filepath)
+
     try:
         main_df, dsp_df = process_supplier_file(filepath)
         main_json = main_df.to_dict(orient='records') if not main_df.empty else []
@@ -138,6 +150,7 @@ def download_result():
     dsp_df = app.config.get('LAST_DSP')
     if main_df is None or dsp_df is None:
         return jsonify({'error': 'Нет обработанных данных'}), 400
+
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         if not main_df.empty:
