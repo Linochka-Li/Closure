@@ -9,9 +9,9 @@
         body { background: #f5f7fa; padding-top: 2rem; }
         .card { border-radius: 1rem; box-shadow: 0 10px 25px rgba(0,0,0,0.05); }
         .table-responsive { max-height: 400px; overflow-y: auto; }
-        .badge-dsp { background: #6c5ce7; }
-        .badge-main { background: #00b894; }
         .loader { display: none; }
+        td, th { text-align: right; }
+        td:first-child, th:first-child { text-align: left; }
     </style>
 </head>
 <body>
@@ -34,7 +34,6 @@
         </div>
     </div>
 
-    <!-- Результаты -->
     <div id="results" style="display: none;" class="mt-4">
         <ul class="nav nav-tabs" id="resultTabs" role="tablist">
             <li class="nav-item" role="presentation">
@@ -57,7 +56,6 @@
         </div>
     </div>
 
-    <!-- Ошибки -->
     <div id="errorAlert" class="alert alert-danger mt-3" style="display: none;"></div>
 </div>
 
@@ -84,7 +82,14 @@
             html += '<tr>';
             headers.forEach(h => {
                 let val = row[h] !== undefined ? row[h] : '';
-                if (typeof val === 'number') val = val.toFixed(2);
+                if (typeof val === 'number') {
+                    // Определяем, столбец с показами или суммами
+                    if (h.includes('Показы') || h.includes('показы')) {
+                        val = val.toFixed(3);   // три знака для показов
+                    } else {
+                        val = val.toFixed(2);   // два знака для сумм и остального
+                    }
+                }
                 html += `<td>${val}</td>`;
             });
             html += '</tr>';
