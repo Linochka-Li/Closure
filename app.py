@@ -48,7 +48,7 @@ def process_supplier_file(filepath):
     df = df[df['Сумма без НДС'] > 0]
     # Удаляем olv_campaign (с пробелами и разным регистром)
     df['Кампания_clean'] = df['Кампания'].astype(str).str.strip().str.lower()
-    df = df[~df['Кампания_clean'].str.contains('olv_campaign', na=False)]
+    df = df[~df['Кампания_clean'].str.contains(r'olv_camp', na=False)]
     df = df.drop(columns=['Кампания_clean'])
     df = df.dropna(subset=['Кампания'])
 
